@@ -7,24 +7,36 @@ on:
 
 jobs:
   build:
-    # macOS 26 (Tahoe) runner — даёт настоящий Xcode 26 / iOS 26 SDK,
-    # в котором физически существуют символы Liquid Glass
-    # (.glassEffect, GlassEffectContainer, .buttonStyle(.glass)).
-    # На macos-15 (Xcode 16, iOS 18 SDK) этих символов не существует
-    # даже для компиляции — поэтому используем macos-26.
-    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_runner: macos-26
+            xcode_glob: "Xcode_26*"
+            label: "macOS26-Xcode26"
+          - os_runner: macos-15
+            xcode_glob: "Xcode_16*"
+            label: "macOS15-Xcode16"
+
+    # ВНИМАНИЕ: сборка на macos-15/Xcode 16 (job "macOS15-Xcode16") почти
+    # наверняка упадёт на компиляции — в коде используются Liquid Glass API
+    # (.glassEffect, GlassEffectContainer, .buttonStyle(.glass)), которых
+    # физически нет в SDK iOS 18 / Xcode 16. Эта job помечена continue-on-error,
+    # чтобы не блокировать основную сборку на macos-26.
+    runs-on: ${{ matrix.os_runner }}
+    continue-on-error: ${{ matrix.os_runner == 'macos-15' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode 26
+      - name: Select Xcode
         run: |
           echo "Доступные версии Xcode на раннере:"
           ls /Applications | grep -i xcode || true
-          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          XCODE_PATH=$(ls -d /Applications/${{ matrix.xcode_glob }}.app 2>/dev/null | sort -V | tail -1)
           if [ -z "$XCODE_PATH" ]; then
-            echo "::error::Xcode 26.x не найден в /Applications на этом раннере"
+            echo "::error::Xcode по шаблону ${{ matrix.xcode_glob }} не найден в /Applications на этом раннере"
             exit 1
           fi
           echo "Использую: $XCODE_PATH"
@@ -42,8 +54,9 @@ jobs:
           # не инвалидировали кэш DerivedData, и в архив мог попасть старый
           # обработанный Info.plist без нужного ключа. Добавляем сам
           # Info.plist в ключ, чтобы такие правки гарантированно пересобирались.
-          key: xcode-${{ hashFiles('project.yml', 'ITDOApp/Info.plist') }}
-          restore-keys: xcode-
+          # matrix.label добавлен, чтобы job'ы на разных Xcode не делили кэш.
+          key: xcode-${{ matrix.label }}-${{ hashFiles('project.yml', 'ITDOApp/Info.plist') }}
+          restore-keys: xcode-${{ matrix.label }}-
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -88,6 +101,32 @@ jobs:
           plutil -p "$PLIST_PATH"
           if ! /usr/libexec/PlistBuddy -c "Print :NSFaceIDUsageDescription" "$PLIST_PATH" >/dev/null 2>&1; then
             echo "::error::NSFaceIDUsageDescription отсутствует в собранном Info.plist — код-пароль с Face ID будет крашить приложение на реальном устройстве"
+            exit 1
+          fi
+          echo "OK: NSFaceIDUsageDescription присутствует в собранном Info.plist"
+
+      - name: Upload full build log (always, for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log-${{ matrix.label }}
+          path: build/xcodebuild.log
+          retention-days: 7
+
+      - name: Package .ipa (unsigned)
+        run: |
+          mkdir -p build/Payload
+          cp -R "build/ITDOApp.xcarchive/Products/Applications/ITDOApp.app" build/Payload/
+          cd build
+          zip -r ITDOApp-unsigned.ipa Payload
+          cd ..
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ITDOApp-unsigned-ipa-${{ matrix.label }}
+          path: build/ITDOApp-unsigned.ipa
+          retention-days: 30            echo "::error::NSFaceIDUsageDescription отсутствует в собранном Info.plist — код-пароль с Face ID будет крашить приложение на реальном устройстве"
             exit 1
           fi
           echo "OK: NSFaceIDUsageDescription присутствует в собранном Info.plist"
