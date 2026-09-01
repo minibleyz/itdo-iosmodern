@@ -49,12 +49,6 @@ jobs:
           path: |
             ~/Library/Caches/org.swift.swiftpm
             ~/Library/Developer/Xcode/DerivedData
-          # Ключ кэша раньше зависел только от project.yml — значит правки
-          # в Info.plist (например, добавление NSFaceIDUsageDescription)
-          # не инвалидировали кэш DerivedData, и в архив мог попасть старый
-          # обработанный Info.plist без нужного ключа. Добавляем сам
-          # Info.plist в ключ, чтобы такие правки гарантированно пересобирались.
-          # matrix.label добавлен, чтобы job'ы на разных Xcode не делили кэш.
           key: xcode-${{ matrix.label }}-${{ hashFiles('project.yml', 'ITDOApp/Info.plist') }}
           restore-keys: xcode-${{ matrix.label }}-
 
@@ -90,6 +84,38 @@ jobs:
           echo "OK: $APP_PATH существует"
 
       - name: Verify Info.plist keys made it into the build
+        run: |
+          PLIST_PATH="build/ITDOApp.xcarchive/Products/Applications/ITDOApp.app/Info.plist"
+          echo "Содержимое собранного Info.plist:"
+          plutil -p "$PLIST_PATH"
+          if ! /usr/libexec/PlistBuddy -c "Print :NSFaceIDUsageDescription" "$PLIST_PATH" >/dev/null 2>&1; then
+            echo "::error::NSFaceIDUsageDescription отсутствует в собранном Info.plist — код-пароль с Face ID будет крашить приложение на реальном устройстве"
+            exit 1
+          fi
+          echo "OK: NSFaceIDUsageDescription присутствует в собранном Info.plist"
+
+      - name: Upload full build log (always, for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log-${{ matrix.label }}
+          path: build/xcodebuild.log
+          retention-days: 7
+
+      - name: Package .ipa (unsigned)
+        run: |
+          mkdir -p build/Payload
+          cp -R "build/ITDOApp.xcarchive/Products/Applications/ITDOApp.app" build/Payload/
+          cd build
+          zip -r ITDOApp-unsigned.ipa Payload
+          cd ..
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ITDOApp-unsigned-ipa-${{ matrix.label }}
+          path: build/ITDOApp-unsigned.ipa
+          retention-days: 30      - name: Verify Info.plist keys made it into the build
         run: |
           # Защита от повторения бага, когда правки в Info.plist (например,
           # NSFaceIDUsageDescription) не попадали в финальный архив из-за
